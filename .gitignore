@@ -1,0 +1,48 @@
+.venv/
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+build/
+dist/
+
+# Sensitive files
+config/config.yaml
+*.key
+*.pem
+*.secret
+*.token
+*.env
+
+# Logs
+data/logs/
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Coverage reports
+coverage/
+.coverage

@@ -1,0 +1,3 @@
+[tool.pylance]
+reportArgumentType = "none"
+reportAttributeAccessIssue = "none"  # Suppress attribute access warnings
