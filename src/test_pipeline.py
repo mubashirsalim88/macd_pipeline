@@ -1,8 +1,10 @@
 import time
 import pandas as pd
+import queue
 from datetime import datetime
 import pytz
 import asyncio
+from typing import List
 from nsepython import nse_quote
 from src.data_pipeline.fyers_websocket import FyersWebSocketClient
 from src.data_pipeline.resampler import Resampler
@@ -60,14 +62,28 @@ def test_pipeline(override_market_check: bool = False):
             for symbol in ws.tick_queues:
                 queue_size = ws.tick_queues[symbol].qsize()
                 ohlcv_df = resampler.ohlcv_data[symbol]["1s"]
-                logger.info(f"{symbol}: Queue size = {queue_size}, OHLCV rows = {len(ohlcv_df)}")
+                # Log queue contents only if non-empty
+                if queue_size > 0:
+                    queue_contents = []
+                    temp_queue = queue.Queue()
+                    while not ws.tick_queues[symbol].empty():
+                        item = ws.tick_queues[symbol].get()
+                        queue_contents.append(item)
+                        temp_queue.put(item)
+                    while not temp_queue.empty():
+                        ws.tick_queues[symbol].put(temp_queue.get())
+                    logger.info(f"{symbol}: Queue size = {queue_size}, OHLCV rows = {len(ohlcv_df)}, Queue contents = {queue_contents}")
                 
                 if i % 30 == 0:
                     if queue_size == 0 and hasattr(ws, 'fetch_quote_fallback'):
-                        quote = ws.fetch_quote_fallback(symbol)
-                        if quote:
-                            ws.tick_queues[symbol].put(quote)
-                            logger.info(f"Fallback quote for {symbol}: {quote}")
+                        batch_size = 10
+                        batch_index = ws.symbols.index(symbol) // batch_size
+                        batch = ws.symbols[batch_index * batch_size:(batch_index + 1) * batch_size]
+                        quotes = ws.fetch_quote_fallback(batch)
+                        for quote in quotes:
+                            if quote and quote["symbol"] == symbol:
+                                ws.tick_queues[symbol].put(quote)
+                                logger.info(f"Fallback quote for {symbol}: {quote}")
                     if not ohlcv_df.empty and validate_ohlcv(symbol, ohlcv_df):
                         logger.info(f"{symbol} validated successfully")
                     else:

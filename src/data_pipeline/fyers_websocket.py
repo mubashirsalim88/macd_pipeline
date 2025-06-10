@@ -2,11 +2,11 @@ from fyers_apiv3.FyersWebsocket import data_ws
 import pandas as pd
 import queue
 import time
+from typing import Dict, Any, List, cast
 from pathlib import Path
 from src.utils.config_loader import load_config
 from src.utils.fyers_auth_ngrok import load_tokens
 from src.utils.logger import get_logger
-from typing import Dict, Any, cast
 from fyers_apiv3 import fyersModel
 from config.config import SYMBOLS_FILE
 
@@ -42,20 +42,34 @@ class FyersWebSocketClient:
             litemode=False,
             reconnect=True
         )
+        # Validate symbols using REST API
+        valid_symbols = []
         test_symbol = self.symbols[0] if self.symbols else "NSE:RELIANCE-EQ"
         try:
             quote_response = self.fyers.quotes({"symbols": test_symbol})
+            logger.info(f"Quote response for {test_symbol}: {quote_response}")
             if isinstance(quote_response, dict) and quote_response.get("s") == "ok":
                 logger.info(f"Token validation quote for {test_symbol}: Success")
+                valid_symbols.append(test_symbol)
             else:
-                logger.error(f"Invalid token or API issue: {quote_response}")
+                logger.error(f"Invalid token or API issue for {test_symbol}: {quote_response}")
                 raise RuntimeError("Token validation failed")
+            # Validate remaining symbols
+            for symbol in self.symbols[1:]:
+                response = self.fyers.quotes({"symbols": symbol})
+                if isinstance(response, dict) and response.get("s") == "ok":
+                    valid_symbols.append(symbol)
+                else:
+                    logger.warning(f"Invalid symbol {symbol}: {response}")
+            self.symbols = valid_symbols
+            logger.info(f"Validated {len(self.symbols)} symbols")
         except Exception as e:
             logger.error(f"Token validation failed: {e}")
             raise
 
     def _on_message(self, message: Dict[str, Any]) -> None:
         """Handle incoming WebSocket messages."""
+        logger.debug(f"Raw WebSocket message: {message}")
         try:
             if not isinstance(message, dict):
                 logger.error(f"Unexpected message type: {type(message)}")
@@ -70,28 +84,45 @@ class FyersWebSocketClient:
                 self.last_tick_time = time.time()
                 logger.info(f"Received tick for {symbol}: LTP={ltp}, Volume={vol}")
             else:
-                logger.debug(f"Non-tick or invalid message")
+                logger.debug(f"Non-tick or invalid message for symbol: {symbol}, ltp: {ltp}")
         except Exception as e:
             logger.error(f"Error processing message: {e}")
+
+    def _on_connect(self) -> None:
+        """Handle WebSocket connection establishment."""
+        logger.info(f"WebSocket connected. Subscribing to {len(self.symbols)} symbols")
+        self._subscribe()
+
+    def _subscribe(self) -> None:
+        """Subscribe to symbols in batches."""
+        max_attempts = 3
+        batch_size = 50
+        for attempt in range(1, max_attempts + 1):
+            try:
+                for i in range(0, len(self.symbols), batch_size):
+                    batch = self.symbols[i:i + batch_size]
+                    response = self.ws.subscribe(symbols=batch, data_type="SymbolUpdate")
+                    logger.info(f"Subscription response for batch {i//batch_size + 1}: {response}")
+                    if response is not None and not isinstance(response, dict):
+                        logger.warning(f"Unexpected subscription response for batch {i//batch_size + 1}: {response}")
+                self.ws.keep_running()
+                logger.info("Subscription request sent")
+                break
+            except Exception as e:
+                logger.error(f"Subscription attempt {attempt}/{max_attempts} failed: {e}")
+                if attempt < max_attempts:
+                    time.sleep(2 ** attempt)
+                else:
+                    raise RuntimeError("Failed to subscribe after retries")
 
     def _on_error(self, message: Dict[str, Any]) -> None:
         """Handle WebSocket errors."""
         logger.error(f"WebSocket error: {message}")
         try:
-            self.ws.subscribe(symbols=self.symbols, data_type="SymbolData")
-            logger.info("Resubscribed to symbols due to error")
+            self._subscribe()
+            logger.info("Resubscribed to symbols")
         except Exception as e:
             logger.error(f"Failed to resubscribe: {e}")
-
-    def _on_connect(self) -> None:
-        """Handle WebSocket connection establishment."""
-        logger.info(f"WebSocket connected. Subscribing to {len(self.symbols)} symbols")
-        try:
-            self.ws.subscribe(symbols=self.symbols, data_type="SymbolData")
-            self.ws.keep_running()
-            logger.info("Subscription request sent")
-        except Exception as e:
-            logger.error(f"Subscription failed: {e}")
 
     def _on_close(self, message: Dict[str, Any]) -> None:
         """Handle WebSocket closure."""
@@ -101,24 +132,32 @@ class FyersWebSocketClient:
         """Start the WebSocket client with retry logic."""
         max_retries = 5
         attempt = 0
+        last_subscription_time = time.time()
         while attempt < max_retries:
             try:
                 self.ws.connect()
                 logger.info("WebSocket connection initiated")
                 while True:
                     time.sleep(60)
+                    # Periodic re-subscription every 5 minutes
+                    if time.time() - last_subscription_time > 300:
+                        try:
+                            self._subscribe()
+                            last_subscription_time = time.time()
+                            logger.info("Periodic re-subscription completed")
+                        except Exception as e:
+                            logger.error(f"Periodic re-subscription failed: {e}")
+                    # Check for ticks
                     if time.time() - self.last_tick_time > 120:
                         logger.warning("No ticks received for 2 minutes. Fetching fallback quotes.")
-                        for symbol in self.symbols:
-                            quote = self.fetch_quote_fallback(symbol)
-                            if quote:
-                                self.tick_queues[symbol].put(quote)
-                                logger.info(f"Fallback quote for {symbol}")
-                    try:
-                        self.ws.subscribe(symbols=self.symbols, data_type="SymbolData")
-                        logger.debug("Refreshed subscription")
-                    except Exception as e:
-                        logger.error(f"Subscription refresh failed: {e}")
+                        batch_size = 10
+                        for i in range(0, len(self.symbols), batch_size):
+                            batch = self.symbols[i:i + batch_size]
+                            quotes = self.fetch_quote_fallback(batch)
+                            for quote in quotes:
+                                if quote and quote["symbol"] in self.tick_queues:
+                                    self.tick_queues[quote["symbol"]].put(quote)
+                                    logger.info(f"Fallback quote for {quote['symbol']}")
             except Exception as e:
                 attempt += 1
                 logger.error(f"Attempt {attempt}/{max_retries} failed: {e}")
@@ -136,21 +175,30 @@ class FyersWebSocketClient:
         except Exception as e:
             logger.error(f"Error during WebSocket stop: {e}")
 
-    def fetch_quote_fallback(self, symbol: str) -> Dict[str, Any]:
-        """Fetch fallback quote for a symbol via REST API."""
+    def fetch_quote_fallback(self, symbols: List[str]) -> List[Dict[str, Any]]:
+        """Fetch fallback quotes for symbols via REST API."""
         try:
-            response = self.fyers.quotes({"symbols": symbol})
-            logger.debug(f"Fallback quote response for {symbol}")
+            response = self.fyers.quotes({"symbols": ",".join(symbols)})
+            logger.debug(f"Batch fallback quote response for {len(symbols)} symbols")
+            results = []
             if isinstance(response, dict) and response.get("s") == "ok" and response.get("d"):
-                quote = response["d"][0]["v"]
-                timestamp = pd.Timestamp.now(tz="Asia/Kolkata")
-                return {"timestamp": timestamp, "ltp": quote.get("lp"), "volume": quote.get("volume")}
+                for quote in response["d"]:
+                    timestamp = pd.Timestamp.now(tz="Asia/Kolkata")
+                    if quote["v"].get("lp") is not None:
+                        results.append({
+                            "symbol": quote["n"],
+                            "timestamp": timestamp,
+                            "ltp": quote["v"].get("lp"),
+                            "volume": quote["v"].get("volume")
+                        })
+                    else:
+                        logger.warning(f"No LTP in quote for {quote['n']}: {quote}")
             else:
-                logger.warning(f"Failed to fetch quote for {symbol}: {response}")
-                return {}
+                logger.warning(f"Failed to fetch batch quotes: {response}")
+            return results
         except Exception as e:
-            logger.error(f"Error fetching quote for {symbol}: {e}")
-            return {}
+            logger.error(f"Error fetching batch quotes: {e}")
+            return []
 
 if __name__ == "__main__":
     ws = FyersWebSocketClient()
@@ -160,9 +208,9 @@ if __name__ == "__main__":
             time.sleep(60)
             for symbol in ws.tick_queues:
                 if ws.tick_queues[symbol].qsize() == 0:
-                    quote = ws.fetch_quote_fallback(symbol)
+                    quote = ws.fetch_quote_fallback([symbol])
                     if quote:
-                        ws.tick_queues[symbol].put(quote)
-                        logger.info(f"Fallback quote for {symbol}")
+                        ws.tick_queues[symbol].put(quote[0])
+                        logger.info(f"Fallback quote for {symbol}: {quote[0]}")
     except KeyboardInterrupt:
         ws.stop()
