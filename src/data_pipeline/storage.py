@@ -34,6 +34,14 @@ class Storage:
         resolved_path = file_path.resolve()
         logger.debug(f"Saving {symbol} ({timeframe}) to {resolved_path}")
 
+        # Validate and convert timestamps
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+            if df['timestamp'].isna().any():
+                logger.error(f"Invalid timestamps found in {symbol} ({timeframe})")
+                return
+            logger.debug(f"New data timestamp range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+
         # Write test file for debugging
         test_path = file_path.with_suffix('.txt')
         try:
@@ -60,14 +68,28 @@ class Storage:
                     with pd.HDFStore(resolved_path, mode='a') as store:
                         if f"/{key}" in store:
                             existing_df = store[key]
-                            if 'timestamp' in df.columns and 'timestamp' in existing_df.columns:
-                                existing_timestamps = set(existing_df['timestamp'])
-                                df = df[~df['timestamp'].isin(existing_timestamps)]
-                            if df.empty:
-                                logger.info(f"No new data to append for {symbol} ({timeframe})")
-                                return
-                        store.append(key, df, format='table', data_columns=True)
-                    logger.info(f"Appended historical for {symbol} ({timeframe}) to {resolved_path}, rows: {len(df)}")
+                            if 'timestamp' in existing_df.columns:
+                                existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                                logger.debug(f"Existing data timestamp range: {existing_df['timestamp'].min()} to {existing_df['timestamp'].max()}")
+                                # Skip merge if new data fully covers existing range
+                                if (df['timestamp'].min() <= existing_df['timestamp'].min() and 
+                                    df['timestamp'].max() >= existing_df['timestamp'].max()):
+                                    logger.info(f"New data covers existing range for {symbol} ({timeframe}). Overwriting.")
+                                else:
+                                    combined_df = pd.concat([existing_df, df], ignore_index=True)
+                                    duplicates = combined_df['timestamp'].duplicated().sum()
+                                    if duplicates:
+                                        logger.warning(f"Removed {duplicates} duplicates for {symbol} ({timeframe})")
+                                        combined_df = combined_df.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+                                    df = combined_df
+                                    if df.empty:
+                                        logger.info(f"No data after deduplication for {symbol} ({timeframe})")
+                                        return
+                            else:
+                                logger.warning(f"No timestamp column in existing data for {symbol} ({timeframe})")
+                        # Save (overwrite existing key)
+                        store.put(key, df, format='table', data_columns=True)
+                    logger.info(f"Saved historical for {symbol} ({timeframe}) to {resolved_path}, rows: {len(df)}")
                     if file_path.exists():
                         file_size = os.path.getsize(file_path)
                         logger.info(f"Verified {resolved_path}: Size {file_size} bytes")
@@ -95,6 +117,11 @@ class Storage:
                         elif not isinstance(df, pd.DataFrame):
                             logger.warning(f"Unexpected data type {type(df)} for {symbol} ({timeframe})")
                             return pd.DataFrame()
+                        # Ensure timestamp is timezone-aware
+                        if 'timestamp' in df.columns:
+                            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                            if df['timestamp'].isna().any():
+                                logger.warning(f"Invalid timestamps in {symbol} ({timeframe})")
                         logger.debug(f"Loaded historical data for {symbol} ({timeframe}), rows: {len(df)}")
                         return df
                     else:
@@ -125,8 +152,8 @@ class Storage:
                     if f"/{key}" in store:
                         df = store[key]
                         if df is not None and not df.empty and "timestamp" in df.columns:
-                            df["timestamp"] = pd.to_datetime(df["timestamp"])
-                            cutoff = pd.Timestamp.now(tz=df["timestamp"].iloc[0].tz) - pd.Timedelta(days=retention_days)
+                            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                            cutoff = pd.Timestamp.now(tz='Asia/Kolkata') - pd.Timedelta(days=retention_days)
                             df = df[df["timestamp"] > cutoff]
                             store.put(key, df, format='table', data_columns=True)
                             logger.info(f"Trimmed data for {symbol} ({timeframe}) before {cutoff}")
