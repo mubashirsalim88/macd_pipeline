@@ -7,7 +7,6 @@ from typing import List, Dict, Any, cast
 from collections.abc import Sequence
 from pathlib import Path
 from fyers_apiv3 import fyersModel
-import stat
 from src.utils.config_loader import load_config
 from src.utils.fyers_auth_ngrok import load_tokens
 from src.data_pipeline.storage import Storage
@@ -32,12 +31,9 @@ class Backfill:
         self.base_path = Path(r"C:\Users\mubas\OneDrive\Desktop\macd_pipeline")
         self.storage_path = self.base_path / 'data/ticks/historical'
         self.data_pipeline_path = self.base_path / 'data/ticks/data_pipeline'
-        try:
-            os.makedirs(self.storage_path, exist_ok=True)
-            os.makedirs(self.data_pipeline_path, exist_ok=True)
-            logger.info(f"Ensured directories: {self.storage_path}, {self.data_pipeline_path}")
-        except Exception as e:
-            logger.error(f"Failed to create directories: {e}")
+        os.makedirs(self.storage_path, exist_ok=True)
+        os.makedirs(self.data_pipeline_path, exist_ok=True)
+        logger.info(f"Ensured directories: {self.storage_path}, {self.data_pipeline_path}")
         # Clean up stray NSE files
         for path in [self.storage_path / "NSE", self.data_pipeline_path / "NSE"]:
             if path.exists():
@@ -50,7 +46,7 @@ class Backfill:
                         shutil.rmtree(path)
                         logger.info(f"Removed stray NSE directory at {path}")
                 except Exception as e:
-                        logger.error(f"Failed to delete NSE entry: {e}")
+                    logger.error(f"Failed to delete NSE entry: {e}")
         self.blacklist = {'NSE:UNITEDSPIRITS-EQ', 'NSE:ZOMATO-EQ'}
         valid_symbols = []
         for symbol in self.symbols:
@@ -74,7 +70,6 @@ class Backfill:
             if df.empty:
                 logger.warning(f"No data for {symbol} ({timeframe}). Full gap detected")
                 return [{"start": expected_start, "end": expected_end}]
-            # Ensure timestamps are timezone-aware
             df["timestamp"] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dt.tz_convert("Asia/Kolkata")
             if df['timestamp'].isna().any():
                 logger.warning(f"Invalid timestamps in {symbol} ({timeframe})")
@@ -100,18 +95,20 @@ class Backfill:
 
     async def fetch_historical_data(self, symbol: str, interval: int, lookback: int, today_only: bool = False) -> List[Dict[str, Any]]:
         try:
+            lookback = min(lookback, 100)  # Cap at 100 days per Fyers API limit
             if today_only:
-                from_date = to_date = pd.Timestamp.now(tz="Asia/Kolkata").strftime('%Y-%m-%d')
+                now = pd.Timestamp.now(tz="Asia/Kolkata")
+                from_date = to_date = now.strftime('%Y-%m-%d')
                 periods = [(from_date, to_date)]
             else:
-                to_date = pd.Timestamp.now(tz="Asia/Kolkata")
+                to_date = pd.Timestamp.now(tz="Asia/Kolkata") - pd.Timedelta(days=1)  # Up to yesterday
                 from_date = to_date - pd.Timedelta(days=lookback)
                 periods = []
                 current_start = from_date
                 while current_start <= to_date:
                     current_end = min(current_start + pd.Timedelta(days=60), to_date)
                     periods.append((current_start.strftime('%Y-%m-%d'), current_end.strftime('%Y-%m-%d')))
-                    current_start = current_end + pd.Timedelta(seconds=1)  # Avoid overlap
+                    current_start = current_end + pd.Timedelta(seconds=1)
             all_candles = []
             for start, end in periods:
                 data = {
@@ -131,19 +128,14 @@ class Backfill:
                     logger.info(f"Fetched {len(candles)} candles for {symbol} ({interval}) from {start} to {end}")
                     all_candles.extend(candles)
                 else:
-                    logger.error(f"Failed to fetch {symbol}: {response}")
+                    logger.warning(f"No data for {symbol} ({interval}) from {start} to {end}: {response}")
                 await asyncio.sleep(2)
             if all_candles:
-                # Deduplicate candles early
                 df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 duplicates = df['timestamp'].duplicated().sum()
                 if duplicates:
-                    logger.warning(f"Removed {duplicates} duplicate timestamps in raw data for {symbol} ({interval})")
+                    logger.warning(f"Removed {duplicates} duplicate timestamps for {symbol} ({interval})")
                     df = df.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
-                # Export raw candles for debugging
-                raw_csv_path = self.storage_path / f"raw_candles_{symbol.replace(':', '_')}_{interval}min.csv"
-                df.to_csv(raw_csv_path, index=False)
-                logger.info(f"Exported raw candles for {symbol} ({interval}) to {raw_csv_path}")
                 return cast(List[Dict[str, Any]], df.to_dict('records'))
             return []
         except Exception as e:
@@ -155,11 +147,9 @@ class Backfill:
             logger.warning(f"No data to save for {symbol} ({interval})")
             return
         df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        # Validate timestamps are in seconds
         if df['timestamp'].max() > 1e12:  # Nanoseconds
             logger.error(f"Invalid timestamp units for {symbol} ({interval}): {df['timestamp'].head()}")
             return
-        # Ensure timezone-aware timestamps
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.tz_convert('Asia/Kolkata')
         interval_str = f"{interval}min" if interval >= 1 else f"{int(interval*60)}s"
         try:
@@ -170,13 +160,10 @@ class Backfill:
                 logger.info(f"Verified {file_path}: Size {os.path.getsize(file_path)} bytes")
             else:
                 logger.error(f"File not found after save: {file_path}")
-            # Export to CSV for debugging
-            df.to_csv(self.storage_path / f"{interval_str}_{symbol.replace(':', '_')}.csv", index=False)
-            logger.info(f"Exported {symbol} ({interval_str}) to CSV for debugging")
         except Exception as e:
             logger.error(f"Error saving {symbol} ({interval_str}): {e}")
 
-    async def backfill_symbol(self, symbol: str, interval: int, lookback_days: int, today_only: bool = True, max_attempts: int = 3):
+    async def backfill_symbol(self, symbol: str, interval: int, lookback_days: int, today_only: bool = False, max_attempts: int = 3):
         for attempt in range(1, max_attempts + 1):
             try:
                 candles = await self.fetch_historical_data(symbol, interval, lookback_days, today_only)
@@ -190,8 +177,7 @@ class Backfill:
                 if attempt == max_attempts:
                     logger.error(f"Failed to backfill {symbol} after {max_attempts} attempts")
                     return
-                else:
-                    await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(2 ** attempt)
 
     async def backfill_gaps(self, symbol: str, timeframe: str, gaps: List[Dict[str, str]]):
         try:
@@ -199,7 +185,6 @@ class Backfill:
                 for gap in gaps:
                     start_ts = pd.Timestamp(gap["start"], tz="Asia/Kolkata")
                     end_ts = pd.Timestamp(gap["end"], tz="Asia/Kolkata")
-                    # Extend fetch period to ensure sufficient data
                     fetch_start = (start_ts - pd.Timedelta(minutes=5)).strftime("%Y-%m-%d")
                     fetch_end = (end_ts + pd.Timedelta(minutes=5)).strftime("%Y-%m-%d")
                     data = {
@@ -222,33 +207,22 @@ class Backfill:
                             if duplicates:
                                 logger.warning(f"Found {duplicates} duplicates for {symbol} ({timeframe})")
                                 df = df.drop_duplicates(subset=['timestamp'], keep='last')
-                            logger.debug(f"1min data range for {symbol}: {df['timestamp'].min()} to {df['timestamp'].max()}")
-                            try:
-                                # Generate all expected timestamps
-                                expected_ts = pd.date_range(start=start_ts, end=end_ts, freq=timeframe, tz="Asia/Kolkata")
-                                df = df.set_index("timestamp").reindex(expected_ts, method='ffill').reset_index()
-                                df = df.rename(columns={'index': 'timestamp'})
-                                # Aggregate to ensure OHLCV consistency
-                                df = df.groupby('timestamp').agg({
-                                    "open": "first",
-                                    "high": "max",
-                                    "low": "min",
-                                    "close": "last",
-                                    "volume": "sum"
-                                }).reset_index()
-                                duplicates = df['timestamp'].duplicated().sum()
-                                if duplicates:
-                                    logger.warning(f"Found {duplicates} duplicates after resampling {symbol} ({timeframe})")
-                                    df = df.drop_duplicates(subset=['timestamp'], keep='last')
-                                logger.debug(f"Resampled data range for {symbol} ({timeframe}): {df['timestamp'].min()} to {df['timestamp'].max()}")
-                                # Export resampled data
-                                resampled_csv = self.storage_path / f"resampled_{timeframe}_{symbol.replace(':', '_')}.csv"
-                                df.to_csv(resampled_csv, index=False)
-                                logger.info(f"Exported resampled data for {symbol} ({timeframe}) to {resampled_csv}")
-                                self.storage.save_historical(symbol, df, timeframe)
-                                logger.info(f"Backfilled {symbol} ({timeframe}) for gap {gap['start']} to {gap['end']}")
-                            except Exception as e:
-                                logger.error(f"Failed to resample {symbol} ({timeframe}): {e}")
+                            expected_ts = pd.date_range(start=start_ts, end=end_ts, freq=timeframe, tz="Asia/Kolkata")
+                            df = df.set_index("timestamp").reindex(expected_ts, method='ffill').reset_index()
+                            df = df.rename(columns={'index': 'timestamp'})
+                            df = df.groupby('timestamp').agg({
+                                "open": "first",
+                                "high": "max",
+                                "low": "min",
+                                "close": "last",
+                                "volume": "sum"
+                            }).reset_index()
+                            duplicates = df['timestamp'].duplicated().sum()
+                            if duplicates:
+                                logger.warning(f"Found {duplicates} duplicates after resampling {symbol} ({timeframe})")
+                                df = df.drop_duplicates(subset=['timestamp'], keep='last')
+                            self.storage.save_historical(symbol, df, timeframe)
+                            logger.info(f"Backfilled {symbol} ({timeframe}) for gap {gap['start']} to {gap['end']}")
                         else:
                             logger.warning(f"No 1min data for {symbol} ({timeframe})")
                     else:
@@ -280,10 +254,7 @@ class Backfill:
                             logger.warning(f"No data for {symbol} ({timeframe})")
                     else:
                         logger.error(f"Failed to backfill {symbol} ({timeframe}): {response}")
-            # Re-check gaps after backfill
-            market_open = pd.Timestamp.now(tz="Asia/Kolkata").replace(hour=9, minute=15, second=0, microsecond=0)
-            market_close = pd.Timestamp.now(tz="Asia/Kolkata").replace(hour=15, minute=30, second=0, microsecond=0)
-            remaining_gaps = self.check_data_gaps(symbol, timeframe, market_open.strftime("%Y-%m-%d %H:%M:%S%z"), market_close.strftime("%Y-%m-%d %H:%M:%S%z"))
+            remaining_gaps = self.check_data_gaps(symbol, timeframe, gaps[0]["start"], gaps[-1]["end"])
             if not remaining_gaps:
                 logger.info(f"No gaps remain for {symbol} ({timeframe}) after backfill")
             else:
@@ -294,18 +265,23 @@ class Backfill:
     async def backfill_all(self, interval: int = 1, lookback_days: int = 1, today_only: bool = False):
         api_calls = 0
         start_time = time.time()
-        market_open = pd.Timestamp.now(tz="Asia/Kolkata").replace(hour=9, minute=15, second=0, microsecond=0)
-        market_close = pd.Timestamp.now(tz="Asia/Kolkata").replace(hour=15, minute=30, second=0, microsecond=0)
-        test_symbols = ["NSE:RELIANCE-EQ"]
+        yesterday = pd.Timestamp.now(tz="Asia/Kolkata") - pd.Timedelta(days=1)
+        market_open = yesterday.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = yesterday.replace(hour=15, minute=30, second=0, microsecond=0)
+        test_symbols = self.symbols  # Use all validated symbols
         for symbol in test_symbols:
             await self.validate_token()
             for tf in ["15s", "30s", "1min", "3min", "5min"]:
-                gaps = self.check_data_gaps(symbol, tf, market_open.strftime("%Y-%m-%d %H:%M:%S%z"), market_close.strftime("%Y-%m-%d %H:%M:%S%z"))
+                gaps = self.check_data_gaps(
+                    symbol, tf,
+                    market_open.strftime("%Y-%m-%d %H:%M:%S%z"),
+                    market_close.strftime("%Y-%m-%d %H:%M:%S%z")
+                )
                 if gaps:
                     await self.backfill_gaps(symbol, tf, gaps)
             if not today_only:
                 for interval in [1, 3, 5]:
-                    await self.backfill_symbol(symbol, interval, lookback_days)
+                    await self.backfill_symbol(symbol, interval, lookback_days, today_only=False)
             api_calls += 3
             if api_calls >= 30:
                 elapsed = time.time() - start_time
@@ -326,29 +302,23 @@ class Backfill:
                 if isinstance(quote_response, dict) and quote_response.get('s') == 'ok':
                     logger.info("Fetching quotes successful")
                     return
-
                 logger.error(f"Token validation failed: {quote_response}")
                 self.access_token = load_tokens()
-
                 log_dir = Path("data/logs")
                 log_dir.mkdir(parents=True, exist_ok=True)
-
                 self.fyers = fyersModel.FyersModel(
                     client_id=self.client_id,
                     token=self.access_token,
                     log_path=str(log_dir)
                 )
-
                 quote_response = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: self.fyers.quotes({"symbols": ["NSE:RELIANCE-EQ"]})
                 )
                 if isinstance(quote_response, dict) and quote_response.get('s') == 'ok':
                     logger.info("Token refreshed successfully")
                     return
-
                 logger.error(f"Token refresh failed: {quote_response}")
                 raise RuntimeError("Unable to validate or refresh token")
-
             except Exception as e:
                 logger.error(f"Error validating token (attempt {attempt}): {e}")
                 if attempt == max_attempts:
@@ -357,7 +327,4 @@ class Backfill:
 
 if __name__ == "__main__":
     backfill = Backfill()
-    try:
-        asyncio.run(backfill.backfill_all(lookback_days=600))
-    except Exception as e:
-        logger.error(f"Backfill failed: {e}")
+    asyncio.run(backfill.backfill_all(lookback_days=7))

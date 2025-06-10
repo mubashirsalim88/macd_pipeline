@@ -8,22 +8,16 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 class Storage:
-    def __init__(self):
-        self.base_path = Path(r"C:\Users\mubas\OneDrive\Desktop\macd_pipeline")
-        self.tick_path = self.base_path / 'data/ticks/data_pipeline'
-        self.historical_path = self.base_path / 'data/ticks/historical'
-        self.indicators_path = self.base_path / 'data/indicators'
-        for path in [self.tick_path, self.historical_path, self.indicators_path]:
-            try:
+    def __init__(self, csv_debug=False):
+            self.base_path = Path(r"C:\Users\mubas\OneDrive\Desktop\macd_pipeline")
+            self.tick_path = self.base_path / 'data/ticks/data_pipeline'
+            self.historical_path = self.base_path / 'data/ticks/historical'
+            self.indicators_path = self.base_path / 'data/indicators'
+            for path in [self.tick_path, self.historical_path, self.indicators_path]:
                 os.makedirs(path, exist_ok=True)
                 logger.info(f"Ensured directory exists: {path}")
-                if not os.access(path, os.W_OK):
-                    logger.error(f"No write permission for {path}")
-            except Exception as e:
-                logger.error(f"Failed to create directory {path}: {e}")
-        logger.info(f"Initialized storage. Historical path: {self.historical_path}")
-        self.lock = Lock()
-        self.csv_debug = False  # Set to True for CSV debugging
+            self.lock = Lock()
+            self.csv_debug = csv_debug
 
     def save_historical(self, symbol: str, df: pd.DataFrame, timeframe: str):
         if df.empty:
@@ -135,8 +129,41 @@ class Storage:
             return pd.DataFrame()
 
     def save_ohlcv(self, symbol: str, df: pd.DataFrame, timeframe: str):
-        # Placeholder: Implement if needed
-        pass
+            if df.empty:
+                logger.warning(f"Empty OHLCV DataFrame for {symbol} ({timeframe}). Skipping save.")
+                return
+            file_path = self.historical_path / f"{timeframe}.h5"
+            key = symbol.replace(":", "_")
+            resolved_path = file_path.resolve()
+            logger.debug(f"Saving OHLCV {symbol} ({timeframe}) to {resolved_path}")
+
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                if df['timestamp'].isna().any():
+                    logger.error(f"Invalid timestamps in OHLCV for {symbol} ({timeframe})")
+                    return
+
+            with self.lock:
+                for attempt in range(1, 4):
+                    try:
+                        with pd.HDFStore(resolved_path, mode='a') as store:
+                            if f"/{key}" in store:
+                                existing_df = store[key]
+                                if 'timestamp' in existing_df.columns:
+                                    existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                                    combined_df = pd.concat([existing_df, df], ignore_index=True)
+                                    duplicates = combined_df['timestamp'].duplicated().sum()
+                                    if duplicates:
+                                        logger.warning(f"Removed {duplicates} duplicates for {symbol} ({timeframe})")
+                                        combined_df = combined_df.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+                                    df = combined_df
+                            store.put(key, df, format='table', data_columns=True)
+                        logger.info(f"Saved OHLCV for {symbol} ({timeframe}) to {resolved_path}, rows: {len(df)}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt}/3 failed for {resolved_path}: {e}")
+                        if attempt == 3:
+                            logger.error(f"Failed to save OHLCV for {symbol}: {e}")
 
     def save_indicators(self, symbol: str, df: pd.DataFrame, timeframe: str, indicator_type: str):
         # Placeholder: Implement if needed
