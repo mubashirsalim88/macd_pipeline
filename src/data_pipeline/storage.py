@@ -1,124 +1,108 @@
-# src/data_pipeline/storage.py
 import pandas as pd
-import boto3
-import tempfile
+import os
+import time
 from pathlib import Path
-from filelock import FileLock
-from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 class Storage:
-    def __init__(self, config_path: str = "config/config.yaml"):
-        self.config = load_config(config_path)
-        self.storage_type = self.config.get("storage", {}).get("type", "local")
-        self.base_path = Path(r"C:\Users\mubas\OneDrive\Desktop\macd_pipeline")
-        self.local_dir = self.base_path / "data"
-        self.s3_client = None
-        self.bucket = None
-        if self.storage_type == "s3":
-            s3_config = self.config.get("storage", {}).get("s3", {})
-            required_keys = ["access_key", "secret_key", "bucket", "region"]
-            if not s3_config or not all(
-                key in s3_config and isinstance(s3_config[key], str) and s3_config[key]
-                for key in required_keys
-            ):
-                logger.warning("Incomplete or invalid S3 configuration. Falling back to local storage.")
-                self.storage_type = "local"
-            else:
-                try:
-                    region = s3_config.get("region", "us-east-1")
-                    self.s3_client = boto3.client(
-                        "s3",
-                        aws_access_key_id=s3_config["access_key"],
-                        aws_secret_access_key=s3_config["secret_key"],
-                        region_name=region
-                    )
-                    self.bucket = s3_config["bucket"]
-                    logger.info(f"Initialized S3 storage with bucket: {self.bucket}")
-                except Exception as e:
-                    logger.error(f"Failed to initialize S3 storage: {e}. Falling back to local storage.")
-                    self.storage_type = "local"
-        if self.storage_type == "local":
-            logger.info("Using local storage.")
+    def __init__(self):
+        self.base_path = Path(r"C:\macd_pipeline")
+        self.tick_path = self.base_path / 'data/ticks/data_pipeline'
+        self.historical_path = self.base_path / 'data/ticks/historical'
+        self.tick_path.mkdir(parents=True, exist_ok=True)
+        self.historical_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using local storage. Tick path: {self.tick_path}, Historical path: {self.historical_path}")
+        logger.debug(f"Current working directory: {os.getcwd()}")
+        # Log directory contents at init
+        self._log_directory_contents()
 
-    def save_ohlcv(self, symbol: str, df: pd.DataFrame, timeframe: str | None = None):
+    def _log_directory_contents(self):
+        """Log contents of historical and tick directories for debugging."""
         try:
-            date = df["timestamp"].iloc[-1].strftime("%Y%m%d") if not df.empty else pd.Timestamp.now().strftime("%Y%m%d")
-            key = f"ticks/data_pipeline/{symbol}_{timeframe or '1s'}_{date}.h5"
-            if self.storage_type == "local":
-                file_path = self.local_dir / key
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                lock_path = file_path.with_suffix('.lock')
-                with FileLock(lock_path):
-                    df.to_hdf(file_path, key="ohlcv", mode="w")
-                logger.info(f"Saved OHLCV for {symbol} to {file_path}")
-            elif self.s3_client and self.bucket:
-                with tempfile.NamedTemporaryFile(suffix=".h5") as temp_file:
-                    df.to_hdf(temp_file.name, key="ohlcv", mode="w")
-                    self.s3_client.upload_file(temp_file.name, self.bucket, key)
-                logger.info(f"Saved OHLCV for {symbol} to s3://{self.bucket}/{key}")
-            else:
-                logger.error("S3 storage not initialized. Cannot save OHLCV.")
+            historical_files = [f.name for f in self.historical_path.glob("*")]
+            tick_files = [f.name for f in self.tick_path.glob("*")]
+            logger.debug(f"Historical directory contents (glob): {historical_files}")
+            logger.debug(f"Tick directory contents (glob): {tick_files}")
+            historical_listdir = os.listdir(self.historical_path)
+            tick_listdir = os.listdir(self.tick_path)
+            logger.debug(f"Historical directory contents (listdir): {historical_listdir}")
+            logger.debug(f"Tick directory contents (listdir): {tick_listdir}")
         except Exception as e:
-            logger.error(f"Error saving OHLCV for {symbol}: {e}")
+            logger.error(f"Error logging directory contents: {e}")
 
     def save_historical(self, symbol: str, df: pd.DataFrame, timeframe: str):
         try:
-            key = f"ticks/historical/{symbol}_{timeframe}.h5"
-            file_path = self.local_dir / key
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path = file_path.with_suffix('.lock')
-            with FileLock(lock_path):
-                df.to_hdf(file_path, key="ohlcv", mode="w")
-            logger.info(f"Saved historical for {symbol} to {file_path}")
-            if file_path.exists():
-                file_size = file_path.stat().st_size
-                logger.debug(f"Verified {file_path}: Size {file_size} bytes")
-            else:
-                logger.warning(f"File {file_path} not found after save")
-            if self.storage_type == "s3" and self.s3_client and self.bucket:
-                with tempfile.NamedTemporaryFile(suffix=".h5") as temp_file:
-                    df.to_hdf(temp_file.name, key="ohlcv", mode="w")
-                    self.s3_client.upload_file(temp_file.name, self.bucket, key)
-                logger.info(f"Saved historical for {symbol} to s3://{self.bucket}/{key}")
+            file_path = self.historical_path / f"{symbol}_{timeframe}.h5"
+            logger.debug(f"Writing to {file_path}, exists before: {file_path.exists()}")
+            # Test write to a text file
+            test_path = file_path.with_suffix('.txt')
+            with open(test_path, 'w') as f:
+                f.write(f"Test write for {symbol}_{timeframe} at {pd.Timestamp.now()}")
+            logger.debug(f"Wrote test file: {test_path}")
+            # Write HDF5 with retry
+            for attempt in range(1, 4):
+                try:
+                    df.to_hdf(file_path, key='ohlcv', mode='w', format='table')
+                    with open(file_path, 'a') as f:
+                        os.fsync(f.fileno())
+                    logger.info(f"Saved historical for {symbol} to {file_path}")
+                    # Verify file
+                    if file_path.exists():
+                        file_size = os.path.getsize(file_path)
+                        logger.debug(f"Verified {file_path}: Size {file_size} bytes")
+                    else:
+                        logger.warning(f"File {file_path} not found after save")
+                    break
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt}/3 failed for {file_path}: {e}")
+                    if attempt == 3:
+                        raise
+                    time.sleep(2)
+            self._log_directory_contents()
         except Exception as e:
-            logger.error(f"Error saving historical for {symbol}: {e}")
-
-    def save_indicators(self, symbol: str, df: pd.DataFrame, timeframe: str, indicator_type: str):
-        try:
-            date = pd.Timestamp.now().strftime("%Y%m%d")
-            key = f"indicators/{indicator_type}/{symbol}_{timeframe}_{date}.h5"
-            if self.storage_type == "local":
-                file_path = self.local_dir / key
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                lock_path = file_path.with_suffix('.lock')
-                with FileLock(lock_path):
-                    df.to_hdf(file_path, key=indicator_type, mode="w")
-                logger.info(f"Saved {indicator_type} for {symbol} to {file_path}")
-            elif self.s3_client and self.bucket:
-                with tempfile.NamedTemporaryFile(suffix=".h5") as temp_file:
-                    df.to_hdf(temp_file.name, key=indicator_type, mode="w")
-                    self.s3_client.upload_file(temp_file.name, self.bucket, key)
-                logger.info(f"Saved {indicator_type} for {symbol} to s3://{self.bucket}/{key}")
-            else:
-                logger.error("S3 storage not initialized. Cannot save indicators.")
-        except Exception as e:
-            logger.error(f"Error saving {indicator_type} for {symbol}: {e}")
+            logger.error(f"Error saving historical data for {symbol}: {e}")
+            self._log_directory_contents()
 
     def load_historical(self, symbol: str, timeframe: str) -> pd.DataFrame:
         try:
-            key = f"ticks/historical/{symbol}_{timeframe}.h5"
-            file_path = self.local_dir / key
-            lock_file = file_path.with_suffix('.lock')
-            with FileLock(lock_file):
-                df = pd.read_hdf(file_path, key='ohlcv')  # type: ignore
-            if not isinstance(df, pd.DataFrame):
-                logger.error(f"Loaded data for {symbol} ({timeframe}) is not a DataFrame")
+            file_path = self.historical_path / f"{symbol}_{timeframe}.h5"
+            if file_path.exists():
+                df = pd.read_hdf(file_path, key='ohlcv')
+                if isinstance(df, pd.Series):
+                    df = df.to_frame().T  # Convert Series to DataFrame
+                logger.debug(f"Loaded historical data for {symbol} ({timeframe}) from {file_path}")
+                return df
+            else:
+                logger.error(f"Error loading historical data for {symbol} ({timeframe}): File {file_path} does not exist")
                 return pd.DataFrame()
-            logger.info(f"Loaded historical data for {symbol} ({timeframe}) from {file_path}")
-            return df
         except Exception as e:
             logger.error(f"Error loading historical data for {symbol} ({timeframe}): {e}")
             return pd.DataFrame()
+
+    def trim_old_data(self, symbol: str, timeframe: str, retention_days: int):
+        try:
+            file_path = self.historical_path / f"{symbol}_{timeframe}.h5"
+            if file_path.exists():
+                df = pd.read_hdf(file_path, key='ohlcv')
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                cutoff = pd.Timestamp.now(tz="Asia/Kolkata") - pd.Timedelta(days=retention_days)
+                df = df[df["timestamp"] >= cutoff]
+                for attempt in range(1, 4):
+                    try:
+                        df.to_hdf(file_path, key='ohlcv', mode='w', format='table')
+                        with open(file_path, 'a') as f:
+                            os.fsync(f.fileno())
+                        logger.info(f"Trimmed old data for {symbol} ({timeframe}) before {cutoff}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt}/3 failed for {file_path}: {e}")
+                        if attempt == 3:
+                            raise
+                        time.sleep(2)
+                self._log_directory_contents()
+            else:
+                logger.warning(f"No data to trim for {symbol} ({timeframe})")
+        except Exception as e:
+            logger.error(f"Error trimming data for {symbol} ({timeframe}): {e}")

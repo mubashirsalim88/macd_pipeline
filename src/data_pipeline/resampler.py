@@ -18,7 +18,7 @@ class Resampler:
         self.tick_queues = tick_queues
         self.storage = storage
         self.config = load_config("config/config.yaml")
-        self.timeframes = TIMEFRAMES
+        self.timeframes = TIMEFRAMES  # Includes 15s, 30s, 1min, 3min, 5min
         self.scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
         self.ohlcv_data = {
             symbol: {
