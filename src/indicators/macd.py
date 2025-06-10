@@ -7,11 +7,11 @@ from config.config import MACD_PARAMS
 logger = get_logger(__name__)
 
 class MACD:
-    def __init__(self, df, timeframe, storage_config="config/config.yaml"):
+    def __init__(self, df: pd.DataFrame, timeframe: str):
         self.df = df.copy()
         self.params_list = MACD_PARAMS.get(timeframe, [])
         self.timeframe = timeframe
-        self.storage = Storage(config_path=storage_config)
+        self.storage = Storage()
         self.result = pd.DataFrame()
 
     def compute_macd(self):

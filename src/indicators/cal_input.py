@@ -7,11 +7,11 @@ from config.config import HIGHER_TIMEFRAMES
 logger = get_logger(__name__)
 
 class CalInput:
-    def __init__(self, macd_df, timeframe, storage_config="config/config.yaml"):
+    def __init__(self, macd_df: pd.DataFrame, timeframe: str):
         self.macd_df = macd_df.copy()
         self.timeframe = timeframe
         self.higher_timeframes = HIGHER_TIMEFRAMES.get(timeframe, [])
-        self.storage = Storage(config_path=storage_config)
+        self.storage = Storage()
         self.cal_0 = pd.DataFrame()
         self.cal_1 = pd.DataFrame()
 

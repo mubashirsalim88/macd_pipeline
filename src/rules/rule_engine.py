@@ -11,15 +11,18 @@ logger = get_logger(__name__)
 class RuleEngine:
     def __init__(self, config_path: str = "config/config.yaml"):
         self.config = load_config(config_path)
-        self.storage = Storage(config_path)
+        self.storage = Storage()
         self.timeframes = TIMEFRAMES
 
     def load_indicators(self, symbol: str, timeframe: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         try:
             date = pd.Timestamp.now().strftime("%Y%m%d")
-            macd_df = pd.read_hdf(f"data/indicators/macd/{symbol}_{timeframe}_{date}.h5", key="macd")
-            cal_0_df = pd.read_hdf(f"data/indicators/cal_input_0/{symbol}_{timeframe}_{date}.h5", key="cal_input_0")
-            cal_1_df = pd.read_hdf(f"data/indicators/cal_input_1/{symbol}_{timeframe}_{date}.h5", key="cal_input_1")
+            macd_path = self.storage.indicators_path / 'macd' / f"{symbol}_{timeframe}_{date}.h5"
+            cal_0_path = self.storage.indicators_path / 'cal_input_0' / f"{symbol}_{timeframe}_{date}.h5"
+            cal_1_path = self.storage.indicators_path / 'cal_input_1' / f"{symbol}_{timeframe}_{date}.h5"
+            macd_df = pd.read_hdf(macd_path, key="macd") if macd_path.exists() else pd.DataFrame()
+            cal_0_df = pd.read_hdf(cal_0_path, key="cal_input_0") if cal_0_path.exists() else pd.DataFrame()
+            cal_1_df = pd.read_hdf(cal_1_path, key="cal_input_1") if cal_1_path.exists() else pd.DataFrame()
             macd_df = pd.DataFrame(macd_df) if not isinstance(macd_df, pd.DataFrame) else macd_df
             cal_0_df = pd.DataFrame(cal_0_df) if not isinstance(cal_0_df, pd.DataFrame) else cal_0_df
             cal_1_df = pd.DataFrame(cal_1_df) if not isinstance(cal_1_df, pd.DataFrame) else cal_1_df
