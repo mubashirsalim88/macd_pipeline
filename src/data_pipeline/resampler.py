@@ -4,6 +4,7 @@ from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
 from src.indicators.macd import MACD
 from src.indicators.cal_input import CalInput
+from config.config import TIMEFRAMES, MACD_PARAMS, HIGHER_TIMEFRAMES
 
 logger = get_logger(__name__)
 
@@ -17,7 +18,7 @@ class Resampler:
         self.tick_queues = tick_queues
         self.storage = storage
         self.config = load_config("config/config.yaml")
-        self.timeframes = self.config["timeframes"]  # ["15s", "30s", "1min", "3min", "5min"]
+        self.timeframes = TIMEFRAMES
         self.scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
         self.ohlcv_data = {
             symbol: {
@@ -26,9 +27,7 @@ class Resampler:
             }
             for symbol in tick_queues.keys()
         }
-        # Schedule 1-second aggregation
         self.scheduler.add_job(self.aggregate_ticks, "interval", seconds=1)
-        # Schedule resampling and indicator computation
         for tf in self.timeframes:
             seconds = pd.Timedelta(tf).total_seconds()
             self.scheduler.add_job(
@@ -54,7 +53,7 @@ class Resampler:
                     "high": df["ltp"].max(),
                     "low": df["ltp"].min(),
                     "close": df["ltp"].iloc[-1],
-                    "volume": df["volume"].iloc[-1]  # Assume cumulative volume
+                    "volume": df["volume"].iloc[-1]
                 }
                 self.ohlcv_data[symbol]["1s"] = pd.concat(
                     [self.ohlcv_data[symbol]["1s"], pd.DataFrame([ohlcv])],
@@ -100,18 +99,16 @@ class Resampler:
             return
         
         try:
-            # Compute MACD
-            params = self.config["macd_params"].get(timeframe, [])
+            params = MACD_PARAMS.get(timeframe, [])
             if not params:
                 logger.error(f"No MACD parameters defined for {timeframe}")
                 return
-            macd = MACD(df, params, timeframe)
+            macd = MACD(df, timeframe)
             macd_df = macd.compute_macd()
             macd.save(symbol)
             
-            # Compute CAL INPUT
-            higher_tfs = self.config["higher_timeframes"].get(timeframe, [])
-            cal_input = CalInput(macd_df, timeframe, higher_tfs)
+            higher_tfs = HIGHER_TIMEFRAMES.get(timeframe, [])
+            cal_input = CalInput(macd_df, timeframe)
             cal_0, cal_1 = cal_input.compute_cal_input()
             cal_input.save(symbol)
             logger.info(f"Computed indicators for {symbol} ({timeframe})")

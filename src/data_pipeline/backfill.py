@@ -1,4 +1,3 @@
-# src/data_pipeline/backfill.py
 import asyncio
 import logging
 import time
@@ -11,6 +10,7 @@ from src.utils.config_loader import load_config
 from src.utils.fyers_auth_ngrok import load_tokens
 from pathlib import Path
 from src.data_pipeline.storage import Storage
+from config.config import SYMBOLS_FILE
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,11 +28,10 @@ class Backfill:
             log_path=str(log_dir) + "/"
         )
         self.storage = Storage()
-        self.symbols = pd.read_csv(self.config['symbols']['file'])["symbol"].tolist()
+        self.symbols = pd.read_csv(SYMBOLS_FILE)["symbol"].tolist()
         self.base_path = Path(r"C:\Users\mubas\OneDrive\Desktop\macd_pipeline")
         self.storage_path = self.base_path / 'data/ticks/historical/'
         self.storage_path.mkdir(parents=True, exist_ok=True)
-        # Clean up stray NSE file
         nse_path = self.storage_path / "NSE"
         if nse_path.exists() and nse_path.is_file():
             try:
@@ -137,7 +136,7 @@ class Backfill:
             await self.validate_token()
             await self.backfill_symbol(symbol, interval, lookback_days, today_only)
             api_calls += 1
-            if api_calls % 30 == 0:  # Adjusted for potential stricter Fyers API limits
+            if api_calls % 30 == 0:
                 elapsed = time.time() - start_time
                 logger.info(f"Processed {api_calls} symbols in {elapsed:.2f}s")
                 if elapsed < 60 and api_calls >= 30:

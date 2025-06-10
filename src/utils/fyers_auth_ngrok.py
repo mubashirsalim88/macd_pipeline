@@ -16,13 +16,20 @@ import yaml
 
 logger = get_logger(__name__)
 
+class PreserveFormatDumper(yaml.SafeDumper):
+    """Custom YAML dumper to preserve formatting."""
+    def ignore_aliases(self, data):
+        return True
+
+    def represent_str(self, data):
+        if data.startswith('http'):
+            return self.represent_scalar('tag:yaml.org,2002:str', data, style='plain')
+        return super().represent_str(data)
+
 class OAuthHandler(BaseHTTPRequestHandler):
     auth_code = None
 
     def do_GET(self):
-        """
-        Handle OAuth callback.
-        """
         try:
             parsed_path = urlparse(self.path)
             if parsed_path.path == "/callback":
@@ -47,9 +54,6 @@ class OAuthHandler(BaseHTTPRequestHandler):
             logger.error(f"Error in OAuthHandler: {e}")
 
 def load_tokens() -> str:
-    """
-    Load access token from tokens.json, refreshing if expired.
-    """
     token_path = "data/tokens.json"
     try:
         if os.path.isfile(token_path):
@@ -72,10 +76,22 @@ def load_tokens() -> str:
         logger.error(f"Error loading tokens: {e}")
         raise RuntimeError("Failed to load or refresh tokens")
 
+def update_config_yaml(redirect_url: str):
+    config_path = "config/config.yaml"
+    try:
+        cfg = load_config(config_path)
+        if cfg["fyers"]["redirect_url"] != redirect_url:
+            cfg["fyers"]["redirect_url"] = redirect_url
+            with open(config_path, "w") as f:
+                yaml.dump(cfg, f, Dumper=PreserveFormatDumper, sort_keys=False, allow_unicode=True)
+            logger.info(f"Updated {config_path} with new redirect_url: {redirect_url}")
+        else:
+            logger.info("No update needed for redirect_url")
+    except Exception as e:
+        logger.error(f"Error updating config.yaml: {e}")
+        raise
+
 def get_access_token() -> Tuple[str, Optional[str], Optional[int]]:
-    """
-    Perform OAuth flow to get access token.
-    """
     try:
         cfg = load_config("config/config.yaml")
         client_id = cfg["fyers"]["client_id"]
@@ -83,18 +99,24 @@ def get_access_token() -> Tuple[str, Optional[str], Optional[int]]:
         ngrok_auth_token = cfg["ngrok"]["auth_token"]
         port = cfg["ngrok"]["port"]
 
+        token_path = "data/tokens.json"
+        last_redirect_url = None
+        if os.path.isfile(token_path):
+            with open(token_path, "r") as f:
+                data = json.load(f)
+                last_redirect_url = data.get("redirect_url")
+
         ngrok.set_auth_token(ngrok_auth_token)
         tunnel = ngrok.connect(port, "http")
         if not tunnel.public_url:
             raise RuntimeError("Ngrok failed to provide a public URL")
         redirect_url = f"{tunnel.public_url}/callback"
-        if cfg["fyers"]["redirect_url"] != redirect_url:
-            logger.warning(f"Config redirect_url ({cfg['fyers']['redirect_url']}) does not match ngrok URL ({redirect_url})")
-            cfg["fyers"]["redirect_url"] = redirect_url
-            with open("config/config.yaml", "w") as f:
-                yaml.safe_dump(cfg, f)
-            logger.info("Updated config.yaml with new ngrok redirect_url")
-            print(f"\n*** ACTION REQUIRED ***\nUpdate redirect URL at https://developer.fyers.in to: {redirect_url}\n")
+
+        if last_redirect_url == redirect_url:
+            logger.info("Reusing cached redirect_url")
+        else:
+            update_config_yaml(redirect_url)
+            logger.warning(f"\n*** ACTION REQUIRED ***\nUpdate redirect URL at https://developer.fyers.in to: {redirect_url}\n")
             input("Press Enter after updating the redirect URL...")
 
         session = fyersModel.SessionModel(
@@ -136,7 +158,8 @@ def get_access_token() -> Tuple[str, Optional[str], Optional[int]]:
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "expires_in": expires_in,
-                "issued_at": datetime.now(pytz.UTC).timestamp()
+                "issued_at": datetime.now(pytz.UTC).timestamp(),
+                "redirect_url": redirect_url
             }, f)
         return access_token, refresh_token, expires_in
     except Exception as e:

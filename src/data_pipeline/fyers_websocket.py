@@ -8,6 +8,7 @@ from src.utils.fyers_auth_ngrok import load_tokens
 from src.utils.logger import get_logger
 from typing import Dict, Any, cast
 from fyers_apiv3 import fyersModel
+from config.config import SYMBOLS_FILE
 
 logger = get_logger(__name__)
 
@@ -17,7 +18,7 @@ class FyersWebSocketClient:
         self.config = load_config(config_path)
         self.client_id = self.config["fyers"]["client_id"]
         self.access_token = load_tokens()
-        self.symbols = pd.read_csv(self.config["symbols"]["file"])["symbol"].tolist()
+        self.symbols = pd.read_csv(SYMBOLS_FILE)["symbol"].tolist()
         self.blacklist = {'NSE:UNITEDSPIRITS-EQ', 'NSE:ZOMATO-EQ'}
         self.symbols = [s for s in self.symbols if s not in self.blacklist]
         logger.info(f"Subscribing to {len(self.symbols)} symbols")
@@ -25,11 +26,11 @@ class FyersWebSocketClient:
         self.last_tick_time = time.time()
         log_dir = Path("data/logs")
         log_dir.mkdir(parents=True, exist_ok=True)
-        self.fyers = fyersModel(
+        self.fyers = fyersModel.FyersModel(
             client_id=self.client_id,
             token=self.access_token,
             log_path=str(log_dir) + "/"
-        )  # type: ignore[call-overload]
+        )
         self.ws = data_ws.FyersDataSocket(
             access_token=f"{self.client_id}:{self.access_token}",
             log_path=str(log_dir) + "/",
@@ -44,8 +45,9 @@ class FyersWebSocketClient:
         test_symbol = self.symbols[0] if self.symbols else "NSE:RELIANCE-EQ"
         try:
             quote_response = self.fyers.quotes({"symbols": test_symbol})
-            logger.info(f"Token validation quote for {test_symbol}")
-            if quote_response.get("s") != "ok":
+            if isinstance(quote_response, dict) and quote_response.get("s") == "ok":
+                logger.info(f"Token validation quote for {test_symbol}: Success")
+            else:
                 logger.error(f"Invalid token or API issue: {quote_response}")
                 raise RuntimeError("Token validation failed")
         except Exception as e:
@@ -55,13 +57,11 @@ class FyersWebSocketClient:
     def _on_message(self, message: Dict[str, Any]) -> None:
         """Handle incoming WebSocket messages."""
         try:
-            # Type assertion for runtime safety
             if not isinstance(message, dict):
                 logger.error(f"Unexpected message type: {type(message)}")
                 return
-            # Explicit type cast for Pylance
             message_dict = cast(Dict[str, Any], message)
-            symbol = message_dict.get("symbol")  # type: ignore[attr-defined]
+            symbol = message_dict.get("symbol")
             ltp = message_dict.get("ltp")
             vol = message_dict.get("vol_traded")
             timestamp = pd.Timestamp.now(tz="Asia/Kolkata")

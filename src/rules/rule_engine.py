@@ -3,6 +3,7 @@ import numpy as np
 from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
 from src.data_pipeline.storage import Storage
+from config.config import TIMEFRAMES
 from typing import Tuple
 
 logger = get_logger(__name__)
@@ -11,7 +12,7 @@ class RuleEngine:
     def __init__(self, config_path: str = "config/config.yaml"):
         self.config = load_config(config_path)
         self.storage = Storage(config_path)
-        self.timeframes = self.config["timeframes"]
+        self.timeframes = TIMEFRAMES
 
     def load_indicators(self, symbol: str, timeframe: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         try:

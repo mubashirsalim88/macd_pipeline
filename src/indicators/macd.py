@@ -2,20 +2,20 @@ import pandas as pd
 import numpy as np
 from src.utils.logger import get_logger
 from src.data_pipeline.storage import Storage
+from config.config import MACD_PARAMS
 
 logger = get_logger(__name__)
 
 class MACD:
-    def __init__(self, df, params_list, timeframe, storage_config="config/config.yaml"):
+    def __init__(self, df, timeframe, storage_config="config/config.yaml"):
         self.df = df.copy()
-        self.params_list = params_list
+        self.params_list = MACD_PARAMS.get(timeframe, [])
         self.timeframe = timeframe
         self.storage = Storage(config_path=storage_config)
         self.result = pd.DataFrame()
 
     def compute_macd(self):
         try:
-            # Validate parameters
             valid_params = []
             for fast, slow, signal in self.params_list:
                 if not all(isinstance(x, (int, float)) for x in [fast, slow, signal]):
