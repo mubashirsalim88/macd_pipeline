@@ -24,6 +24,8 @@ class FyersWebSocketClient:
         logger.info(f"Subscribing to {len(self.symbols)} symbols")
         self.tick_queues = {symbol: queue.Queue() for symbol in self.symbols}
         self.last_tick_time = time.time()
+        self.subscribed_symbols = set()  # Track symbols with received ticks
+        self.last_volume = {symbol: 0 for symbol in self.symbols}  # Track last known volume
         log_dir = Path("data/logs")
         log_dir.mkdir(parents=True, exist_ok=True)
         self.fyers = fyersModel.FyersModel(
@@ -75,14 +77,28 @@ class FyersWebSocketClient:
                 logger.error(f"Unexpected message type: {type(message)}")
                 return
             message_dict = cast(Dict[str, Any], message)
+            # Log system messages (e.g., full mode, subscription status)
+            if message_dict.get("type") == "ful":
+                logger.info(f"Mode switch: {message_dict}")
+                if message_dict.get("code") != 200:
+                    logger.error(f"Full mode failed: {message_dict}")
+            elif message_dict.get("type") == "sub":
+                logger.info(f"Subscription status: {message_dict}")
+                if message_dict.get("code") == 11011:
+                    logger.error(f"Subscription failed: {message_dict}")
+            # Process tick messages
             symbol = message_dict.get("symbol")
             ltp = message_dict.get("ltp")
-            vol = message_dict.get("vol_traded")
+            vol = message_dict.get("vol_traded_today", self.last_volume.get(symbol, 0))
+            last_qty = message_dict.get("last_traded_qty", 0)
             timestamp = pd.Timestamp.now(tz="Asia/Kolkata")
             if symbol in self.tick_queues and ltp is not None:
-                self.tick_queues[symbol].put({"timestamp": timestamp, "ltp": ltp, "volume": vol})
+                tick = {"timestamp": timestamp, "ltp": ltp, "volume": vol, "last_qty": last_qty}
+                self.tick_queues[symbol].put(tick)
                 self.last_tick_time = time.time()
-                logger.info(f"Received tick for {symbol}: LTP={ltp}, Volume={vol}")
+                self.subscribed_symbols.add(symbol)
+                self.last_volume[symbol] = vol
+                logger.info(f"Received tick for {symbol}: LTP={ltp}, Volume={vol}, LastQty={last_qty}")
             else:
                 logger.debug(f"Non-tick or invalid message for symbol: {symbol}, ltp: {ltp}")
         except Exception as e:
@@ -94,7 +110,7 @@ class FyersWebSocketClient:
         self._subscribe()
 
     def _subscribe(self) -> None:
-        """Subscribe to symbols in batches."""
+        """Subscribe to symbols in batches with individual retries."""
         max_attempts = 3
         batch_size = 50
         for attempt in range(1, max_attempts + 1):
@@ -103,8 +119,13 @@ class FyersWebSocketClient:
                     batch = self.symbols[i:i + batch_size]
                     response = self.ws.subscribe(symbols=batch, data_type="SymbolUpdate")
                     logger.info(f"Subscription response for batch {i//batch_size + 1}: {response}")
-                    if response is not None and not isinstance(response, dict):
-                        logger.warning(f"Unexpected subscription response for batch {i//batch_size + 1}: {response}")
+                    if response is None:
+                        for symbol in batch:
+                            try:
+                                response = self.ws.subscribe(symbols=[symbol], data_type="SymbolUpdate")
+                                logger.info(f"Individual subscription for {symbol}: {response}")
+                            except Exception as e:
+                                logger.error(f"Failed to subscribe to {symbol}: {e}")
                 self.ws.keep_running()
                 logger.info("Subscription request sent")
                 break
@@ -114,6 +135,10 @@ class FyersWebSocketClient:
                     time.sleep(2 ** attempt)
                 else:
                     raise RuntimeError("Failed to subscribe after retries")
+        # Log missing symbols after subscription
+        missing_symbols = set(self.symbols) - self.subscribed_symbols
+        if missing_symbols:
+            logger.warning(f"Subscribed symbols missing ticks: {missing_symbols}")
 
     def _on_error(self, message: Dict[str, Any]) -> None:
         """Handle WebSocket errors."""
@@ -158,6 +183,10 @@ class FyersWebSocketClient:
                                 if quote and quote["symbol"] in self.tick_queues:
                                     self.tick_queues[quote["symbol"]].put(quote)
                                     logger.info(f"Fallback quote for {quote['symbol']}")
+                    # Log missing symbols
+                    missing_symbols = set(self.symbols) - self.subscribed_symbols
+                    if missing_symbols:
+                        logger.warning(f"Symbols missing ticks: {missing_symbols}")
             except Exception as e:
                 attempt += 1
                 logger.error(f"Attempt {attempt}/{max_retries} failed: {e}")
