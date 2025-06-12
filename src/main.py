@@ -56,7 +56,7 @@ async def run_historical_backfill():
         await backfill.backfill_all(lookback_days=lookback_days, today_only=False)
         logger.info("Historical backfill completed.")
     except Exception as e:
-        logger.error(f"Historical backfill failed: {e}")
+        logger.error(f"Historical backfill failed: {e}", exc_info=True)
 
 async def run_gap_check():
     try:
@@ -64,32 +64,43 @@ async def run_gap_check():
         await check_todays_gaps()
         logger.info("Gap check completed.")
     except Exception as e:
-        logger.error(f"Gap check failed: {e}")
+        logger.error(f"Gap check failed: {e}", exc_info=True)
 
-def run_real_time_processing():
+async def run_real_time_processing():
     try:
         logger.info("Starting real-time tick processing.")
         if not is_market_open():
             wait_for_market_open()
-        test_pipeline(override_market_check=False)  # Enforce market hours check
+        await test_pipeline(override_market_check=False)  # Await the coroutine
         logger.info("Real-time processing completed.")
     except Exception as e:
-        logger.error(f"Real-time processing failed: {e}")
+        logger.error(f"Real-time processing failed: {e}", exc_info=True)
 
 def main():
+    loop = asyncio.get_event_loop()
     while True:
         choice = display_menu()
-        if choice == "1":
-            asyncio.run(run_historical_backfill())
-        elif choice == "2":
-            asyncio.run(run_gap_check())
-        elif choice == "3":
-            run_real_time_processing()
-        elif choice == "4":
-            logger.info("Exiting MACD Pipeline.")
-            break
-        else:
-            print("Invalid choice. Please enter 1, 2, 3, or 4.")
+        try:
+            if choice == "1":
+                loop.run_until_complete(run_historical_backfill())
+            elif choice == "2":
+                loop.run_until_complete(run_gap_check())
+            elif choice == "3":
+                loop.run_until_complete(run_real_time_processing())
+            elif choice == "4":
+                logger.info("Exiting MACD Pipeline.")
+                break
+            else:
+                print("Invalid choice. Please enter 1, 2, 3, or 4.")
+        except Exception as e:
+            logger.error(f"Main loop error: {e}", exc_info=True)
+        finally:
+            if loop.is_running():
+                loop.stop()
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
 
 if __name__ == "__main__":
     main()

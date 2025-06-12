@@ -1,10 +1,9 @@
+import asyncio
 import time
 import pandas as pd
 import queue
 from datetime import datetime, timedelta
 import pytz
-import asyncio
-from typing import List
 from nsepython import nse_quote
 from src.data_pipeline.fyers_websocket import FyersWebSocketClient
 from src.data_pipeline.resampler import Resampler
@@ -15,7 +14,7 @@ from config.config import SYMBOLS_FILE
 
 logger = get_logger(__name__)
 
-def is_market_open():
+async def is_market_open():
     now = datetime.now(pytz.timezone("Asia/Kolkata"))
     market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -23,7 +22,7 @@ def is_market_open():
     logger.info(f"Market status: {'Open' if is_open else 'Closed'} at {now}")
     return is_open
 
-def wait_for_market_open():
+async def wait_for_market_open():
     now = datetime.now(pytz.timezone("Asia/Kolkata"))
     market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
     if now < market_open:
@@ -31,25 +30,25 @@ def wait_for_market_open():
         logger.info(f"Waiting {seconds_to_wait:.0f} seconds until market open at {market_open}")
         while seconds_to_wait > 0:
             print(f"Starting in {int(seconds_to_wait)} seconds...", end="\r")
-            time.sleep(min(seconds_to_wait, 1))
+            await asyncio.sleep(min(seconds_to_wait, 1))
             seconds_to_wait -= 1
-        print(" " * 50, end="\r")  # Clear countdown line
+        print(" " * 50, end="\r")
     logger.info("Market open. Starting pipeline.")
 
-def validate_historical_data(backfill, symbols, timeframes, lookback_days=7):
+async def validate_historical_data(backfill, symbols, timeframes, lookback_days=7):
     market_open = pd.Timestamp.now(tz="Asia/Kolkata").replace(hour=9, minute=15, second=0)
     market_close = pd.Timestamp.now(tz="Asia/Kolkata").replace(hour=15, minute=30, second=0)
     yesterday = market_close - pd.Timedelta(days=1)
     for symbol in symbols:
         for tf in timeframes:
             gaps = backfill.check_data_gaps(
-                symbol, tf, 
+                symbol, tf,
                 (yesterday - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d %H:%M:%S%z"),
                 yesterday.strftime("%Y-%m-%d %H:%M:%S%z")
             )
             if gaps:
                 logger.warning(f"Found {len(gaps)} gaps for {symbol} ({tf}). Triggering backfill.")
-                asyncio.run(backfill.backfill_gaps(symbol, tf, gaps))
+                await backfill.backfill_gaps(symbol, tf, gaps)
 
 def validate_ohlcv(symbol, ohlcv_df):
     try:
@@ -69,38 +68,40 @@ def validate_ohlcv(symbol, ohlcv_df):
         logger.error(f"Validation failed for {symbol}: {e}")
         return False
 
-def test_pipeline(override_market_check: bool = False, test_symbol: str = "NSE:RELIANCE-EQ"):
+async def test_pipeline(override_market_check: bool = False, test_symbol: str = "NSE:RELIANCE-EQ"):
     storage = Storage()
     backfill = Backfill()
     symbols = [test_symbol] if test_symbol else pd.read_csv(SYMBOLS_FILE)["symbol"].tolist()
-    
+
     # Pre-market historical validation (9:00 AM)
     now = datetime.now(pytz.timezone("Asia/Kolkata"))
     pre_market_check = now.replace(hour=9, minute=0, second=0, microsecond=0)
     if now >= pre_market_check and now < now.replace(hour=9, minute=15, second=0):
         logger.info("Validating historical data before market open.")
-        validate_historical_data(backfill, symbols, ["15s", "30s", "1min", "3min", "5min"])
+        await validate_historical_data(backfill, symbols, ["15s", "30s", "1min", "3min", "5min"])
 
     # Wait for market open
     if not override_market_check:
-        wait_for_market_open()
+        await wait_for_market_open()
 
     # Check if market is open
-    if not is_market_open() and not override_market_check:
+    if not await is_market_open() and not override_market_check:
         logger.error("Market is closed. Running backfill instead.")
-        asyncio.run(backfill.backfill_all(lookback_days=7))
+        await backfill.backfill_all(lookback_days=7)
         return
 
     ws = FyersWebSocketClient()
     resampler = Resampler(ws.tick_queues, storage)
-    
+
     try:
-        ws.start()
-        resampler.start()
-        start_time = time.perf_counter()
+        # Start WebSocket in a separate thread
+        ws_task = asyncio.create_task(asyncio.to_thread(ws.start))
+        # Start Resampler
+        resampler_task = asyncio.create_task(resampler.start())
         
+        start_time = time.perf_counter()
         for i in range(300):  # Run for 5 minutes
-            time.sleep(1)
+            await asyncio.sleep(1)
             for symbol in symbols:
                 queue_size = ws.tick_queues[symbol].qsize()
                 ohlcv_df = resampler.ohlcv_data[symbol]["1s"]
@@ -129,12 +130,12 @@ def test_pipeline(override_market_check: bool = False, test_symbol: str = "NSE:R
                         logger.info(f"{symbol} validated successfully")
                     else:
                         logger.warning(f"{symbol} validation failed or no data")
-        
+
         total_rows = sum(len(resampler.ohlcv_data[symbol]["1s"]) for symbol in ws.tick_queues)
         if total_rows == 0:
             logger.warning("No real-time data received. Running backfill.")
-            asyncio.run(backfill.backfill_all(lookback_days=1))
-        
+            await backfill.backfill_all(lookback_days=1)
+
         for symbol in ws.tick_queues:
             for tf in ["15s", "30s", "1min", "3min", "5min"]:
                 ohlcv_df = resampler.ohlcv_data[symbol][tf]
@@ -147,18 +148,18 @@ def test_pipeline(override_market_check: bool = False, test_symbol: str = "NSE:R
                         if latency > 100:
                             logger.warning(f"Storage latency for {symbol} ({tf}) exceeds 100ms")
                     except Exception as e:
-                        logger.error(f"Error saving OHLCV for {symbol} ({tf}): {e}")
-        
+                        logger.error(f"Error saving OHLCV for {symbol} ({tf}): {e}", exc_info=True)
+
         elapsed = time.perf_counter() - start_time
         logger.info(f"Test completed in {elapsed:.2f} seconds")
-    
+
     except Exception as e:
-        logger.error(f"Test pipeline failed: {e}")
-    
+        logger.error(f"Test pipeline failed: {e}", exc_info=True)
+
     finally:
         resampler.stop()
         ws.stop()
         logger.info("Pipeline shutdown complete")
 
 if __name__ == "__main__":
-    test_pipeline()
+    asyncio.run(test_pipeline())

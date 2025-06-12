@@ -129,41 +129,46 @@ class Storage:
             return pd.DataFrame()
 
     def save_ohlcv(self, symbol: str, df: pd.DataFrame, timeframe: str):
-            if df.empty:
-                logger.warning(f"Empty OHLCV DataFrame for {symbol} ({timeframe}). Skipping save.")
+        if df.empty:
+            logger.warning(f"Empty OHLCV DataFrame for {symbol} ({timeframe}). Skipping save.")
+            return
+        file_path = self.historical_path / f"{timeframe}.h5"
+        key = symbol.replace(":", "_")
+        resolved_path = file_path.resolve()
+        logger.debug(f"Saving OHLCV {symbol} ({timeframe}) to {resolved_path}, rows: {len(df)}")
+        
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+            if df['timestamp'].isna().any():
+                logger.error(f"Invalid timestamps in OHLCV for {symbol} ({timeframe})")
                 return
-            file_path = self.historical_path / f"{timeframe}.h5"
-            key = symbol.replace(":", "_")
-            resolved_path = file_path.resolve()
-            logger.debug(f"Saving OHLCV {symbol} ({timeframe}) to {resolved_path}")
+            logger.debug(f"Timestamp range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
-            if 'timestamp' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
-                if df['timestamp'].isna().any():
-                    logger.error(f"Invalid timestamps in OHLCV for {symbol} ({timeframe})")
-                    return
-
-            with self.lock:
-                for attempt in range(1, 4):
-                    try:
-                        with pd.HDFStore(resolved_path, mode='a') as store:
-                            if f"/{key}" in store:
-                                existing_df = store[key]
-                                if 'timestamp' in existing_df.columns:
-                                    existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
-                                    combined_df = pd.concat([existing_df, df], ignore_index=True)
-                                    duplicates = combined_df['timestamp'].duplicated().sum()
-                                    if duplicates:
-                                        logger.warning(f"Removed {duplicates} duplicates for {symbol} ({timeframe})")
-                                        combined_df = combined_df.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
-                                    df = combined_df
-                            store.put(key, df, format='table', data_columns=True)
-                        logger.info(f"Saved OHLCV for {symbol} ({timeframe}) to {resolved_path}, rows: {len(df)}")
-                        break
-                    except Exception as e:
-                        logger.warning(f"Attempt {attempt}/3 failed for {resolved_path}: {e}")
-                        if attempt == 3:
-                            logger.error(f"Failed to save OHLCV for {symbol}: {e}")
+        with self.lock:
+            for attempt in range(1, 4):
+                try:
+                    with pd.HDFStore(resolved_path, mode='a') as store:
+                        if f"/{key}" in store:
+                            existing_df = store[key]
+                            if 'timestamp' in existing_df.columns:
+                                existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                                logger.debug(f"Existing data rows: {len(existing_df)}, Timestamp range: {existing_df['timestamp'].min()} to {existing_df['timestamp'].max()}")
+                                combined_df = pd.concat([existing_df, df], ignore_index=True)
+                                duplicates = combined_df['timestamp'].duplicated().sum()
+                                if duplicates:
+                                    logger.warning(f"Removed {duplicates} duplicates for {symbol} ({timeframe})")
+                                    combined_df = combined_df.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+                                df = combined_df
+                        store.put(key, df, format='table', data_columns=True)
+                    logger.info(f"Saved OHLCV for {symbol} ({timeframe}) to {resolved_path}, rows: {len(df)}")
+                    if file_path.exists():
+                        file_size = os.path.getsize(file_path)
+                        logger.info(f"Verified {resolved_path}: Size {file_size} bytes")
+                    break
+                except Exception as e:
+                    logger.error(f"Attempt {attempt}/3 failed for {resolved_path}: {e}", exc_info=True)
+                    if attempt == 3:
+                        logger.error(f"Failed to save OHLCV for {symbol}: {e}")
 
     def save_indicators(self, symbol: str, df: pd.DataFrame, timeframe: str, indicator_type: str):
         # Placeholder: Implement if needed
