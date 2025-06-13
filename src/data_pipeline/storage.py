@@ -171,8 +171,72 @@ class Storage:
                         logger.error(f"Failed to save OHLCV for {symbol}: {e}")
 
     def save_indicators(self, symbol: str, df: pd.DataFrame, timeframe: str, indicator_type: str):
-        # Placeholder: Implement if needed
-        pass
+            if df.empty:
+                logger.warning(f"Empty DataFrame for {symbol} ({timeframe}, {indicator_type}). Skipping save.")
+                return
+            file_path = self.indicators_path / indicator_type / f"{timeframe}.h5"
+            file_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure indicator_type directory exists
+            key = symbol.replace(":", "_")
+            resolved_path = file_path.resolve()
+            logger.debug(f"Saving {indicator_type} for {symbol} ({timeframe}) to {resolved_path}")
+
+            # Validate and convert timestamps
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                if df['timestamp'].isna().any():
+                    logger.error(f"Invalid timestamps found in {symbol} ({timeframe}, {indicator_type})")
+                    return
+                logger.debug(f"New data timestamp range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+
+            # Fallback to CSV if enabled
+            if self.csv_debug:
+                csv_path = self.indicators_path / indicator_type / f"{timeframe}.csv"
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    df.to_csv(csv_path, mode='a', index=False)
+                    logger.info(f"Saved CSV for {symbol} ({timeframe}, {indicator_type}) to {csv_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save CSV {csv_path}: {e}")
+                return
+
+            # Save to HDF5
+            with self.lock:
+                for attempt in range(1, 4):
+                    try:
+                        with pd.HDFStore(resolved_path, mode='a') as store:
+                            if f"/{key}" in store:
+                                existing_df = store[key]
+                                if 'timestamp' in existing_df.columns:
+                                    existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'], utc=True, errors='coerce').dt.tz_convert('Asia/Kolkata')
+                                    logger.debug(f"Existing data timestamp range: {existing_df['timestamp'].min()} to {existing_df['timestamp'].max()}")
+                                    if (df['timestamp'].min() <= existing_df['timestamp'].min() and 
+                                        df['timestamp'].max() >= existing_df['timestamp'].max()):
+                                        logger.info(f"New data covers existing range for {symbol} ({timeframe}, {indicator_type}). Overwriting.")
+                                    else:
+                                        combined_df = pd.concat([existing_df, df], ignore_index=True)
+                                        duplicates = combined_df['timestamp'].duplicated().sum()
+                                        if duplicates:
+                                            logger.warning(f"Removed {duplicates} duplicates for {symbol} ({timeframe}, {indicator_type})")
+                                            combined_df = combined_df.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+                                        df = combined_df
+                                        if df.empty:
+                                            logger.info(f"No data after deduplication for {symbol} ({timeframe}, {indicator_type})")
+                                            return
+                                else:
+                                    logger.warning(f"No timestamp column in existing data for {symbol} ({timeframe}, {indicator_type})")
+                            store.put(key, df, format='table', data_columns=True)
+                        logger.info(f"Saved {indicator_type} for {symbol} ({timeframe}) to {resolved_path}, rows: {len(df)}")
+                        if file_path.exists():
+                            file_size = os.path.getsize(file_path)
+                            logger.info(f"Verified {resolved_path}: Size {file_size} bytes")
+                        else:
+                            logger.error(f"File {resolved_path} not found after save")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt}/3 failed for {resolved_path}: {e}")
+                        if attempt == 3:
+                            logger.error(f"Failed to save {indicator_type} data for {symbol}: {e}")
+                        time.sleep(2)
 
     def trim_old_data(self, symbol: str, timeframe: str, retention_days: int):
         file_path = self.historical_path / f"{timeframe}.h5"
